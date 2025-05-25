@@ -1,71 +1,78 @@
-from socket import *
+# stress_test_server.py
 import socket
 import threading
+from concurrent.futures import ThreadPoolExecutor, ProcessPoolExecutor
 import logging
-import time
-import sys
-from concurrent.futures import ThreadPoolExecutor
+import os
+import base64
+import json
 
+MODE = "thread"  # atau "process"
+WORKER_COUNT = 5
+SERVER_PORT = 6666
+FILES_DIR = "server_files"
 
-from file_protocol import  FileProtocol
-fp = FileProtocol()
+if not os.path.exists(FILES_DIR):
+    os.makedirs(FILES_DIR)
 
-
-class ProcessTheClient(threading.Thread):
-    def __init__(self, connection, address):
-        self.connection = connection
-        self.address = address
-        threading.Thread.__init__(self)
-
-    def run(self):
-        buffer = b""
+def handle_client(conn, addr):
+    try:
+        data_received = ""
         while True:
-            data = self.connection.recv(4096)
+            data = conn.recv(1024)
             if not data:
                 break
-            buffer += data
-            # Cek dua kemungkinan delimiter
-            while b"\r\n\r\n" in buffer or b"\n\n" in buffer:
-                if b"\r\n\r\n" in buffer:
-                    delimiter = b"\r\n\r\n"
-                else:
-                    delimiter = b"\n\n"
-                parts = buffer.split(delimiter, 1)
-                d = parts[0].decode()
-                hasil = fp.proses_string(d)
-                hasil = hasil + "\r\n\r\n"
-                self.connection.sendall(hasil.encode())
-                buffer = parts[1]
-        self.connection.close()
+            data_received += data.decode()
+            if "\r\n\r\n" in data_received:
+                break
 
+        cmd = data_received.strip().split()
+        if cmd[0] == "LIST":
+            files = os.listdir(FILES_DIR)
+            response = json.dumps({"status": "OK", "data": files})
 
-class Server(threading.Thread):
-    def __init__(self,ipaddress='0.0.0.0',port=8889):
-        self.ipinfo=(ipaddress,port)
-        self.the_clients = []
-        self.my_socket = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.my_socket.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        threading.Thread.__init__(self)
+        elif cmd[0] == "GET":
+            filename = cmd[1]
+            filepath = os.path.join(FILES_DIR, filename)
+            if os.path.exists(filepath):
+                with open(filepath, 'rb') as f:
+                    encoded = base64.b64encode(f.read()).decode()
+                response = json.dumps({"status": "OK", "data_namafile": filename, "data_file": encoded})
+            else:
+                response = json.dumps({"status": "ERROR", "message": "File not found"})
 
-    def run(self):
-        logging.warning(f"server berjalan di ip address {self.ipinfo}")
-        self.my_socket.bind(self.ipinfo)
-        self.my_socket.listen(1)
-        with ThreadPoolExecutor(max_workers=1) as executor:
-            while True:
-                self.connection, self.client_address = self.my_socket.accept()
-                logging.warning(f"connection from {self.client_address}")
+        elif cmd[0] == "UPLOAD":
+            filename = cmd[1]
+            encoded_data = cmd[2]
+            with open(os.path.join(FILES_DIR, filename), 'wb') as f:
+                f.write(base64.b64decode(encoded_data))
+            response = json.dumps({"status": "OK", "message": "Upload sukses"})
 
-                executor.submit(ProcessTheClient(self.connection, self.client_address).run)
-                self.the_clients.append(self.connection)
+        else:
+            response = json.dumps({"status": "ERROR", "message": "Command tidak dikenali"})
 
+        conn.sendall((response + "\r\n\r\n").encode())
 
-def main():
-    svr = Server(ipaddress='0.0.0.0',port=6666)
-    svr.start()
-    svr.join()
+    except Exception as e:
+        logging.warning(f"Error handling client {addr}: {e}")
+    finally:
+        conn.close()
 
+def run_server():
+    s = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+    s.bind(('0.0.0.0', SERVER_PORT))
+    s.listen(100)
+    logging.warning(f"Server listening on port {SERVER_PORT} with {WORKER_COUNT} {MODE} workers")
 
-if __name__ == "__main__":
-    main()
+    if MODE == "thread":
+        pool = ThreadPoolExecutor(max_workers=WORKER_COUNT)
+    else:
+        pool = ProcessPoolExecutor(max_workers=WORKER_COUNT)
 
+    while True:
+        conn, addr = s.accept()
+        pool.submit(handle_client, conn, addr)
+
+if __name__ == '__main__':
+    logging.basicConfig(level=logging.WARNING)
+    run_server()
